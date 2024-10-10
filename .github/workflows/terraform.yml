@@ -1,4 +1,4 @@
-name: Terraform
+name: Test Terraform
 
 on:
   pull_request:
