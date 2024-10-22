@@ -2,7 +2,5 @@
 
 ##Assignment A03
  
- update
 
-Terraform templates for AWS 
 
