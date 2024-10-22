@@ -133,7 +133,7 @@ resource "aws_instance" "app_instance" {
   vpc_security_group_ids = [aws_security_group.app_security_group.id]
 
   # Add key_name to associate the key pair for SSH access
-  
+
 
   root_block_device {
     volume_type           = "gp2"
