@@ -91,7 +91,7 @@ resource "aws_security_group" "app_security_group" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-ingress {
+  ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -189,7 +189,7 @@ resource "aws_db_instance" "my_rds_instance" {
   vpc_security_group_ids = [aws_security_group.db_security_group.id]
   db_subnet_group_name   = aws_db_subnet_group.private_subnets.name
   parameter_group_name   = aws_db_parameter_group.my_db_parameter_group.name
-  skip_final_snapshot = true
+  skip_final_snapshot    = true
 
 
   tags = {
@@ -237,7 +237,7 @@ EOF
 
 
 
-  
+
 
   tags = {
     Name = "app-instance"
