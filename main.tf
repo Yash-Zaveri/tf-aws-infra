@@ -262,7 +262,7 @@ resource "random_id" "bucket_name" {
 
 resource "aws_s3_bucket" "my_bucket" {
   bucket = "my-app-bucket-${random_id.bucket_name.hex}"
-  
+
 
 
 
@@ -287,7 +287,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "my_bucket_lifecycle" {
     }
 
     expiration {
-      days = 365  # Adjust this if needed
+      days = 365 # Adjust this if needed
     }
   }
 }
