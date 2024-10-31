@@ -1,3 +1,4 @@
+# Existing variables
 variable "aws_profile" {
   description = "AWS CLI profile to use"
 }
@@ -39,14 +40,11 @@ variable "key_name" {
   default     = null
 }
 
-
 variable "root_volume_size" {
   type        = number
   default     = 25
   description = "The size of the root volume for the EC2 instance"
 }
-
-
 
 variable "db_user" {
   type        = string
@@ -69,11 +67,46 @@ variable "db_name" {
 variable "db_port" {
   type        = number
   default     = 3306
-  description = "Database port number."
+  description = "Database port."
 }
 
+# New variables added for IAM, S3, and tagging configurations
 variable "environment_tag" {
   type        = string
-  default     = ""
-  description = "Environment tag for resources."
+  default     = "production"
+  description = "Environment tag for resources (e.g., production, staging, development)"
+}
+
+variable "s3_bucket_name_prefix" {
+  type        = string
+  description = "Prefix for the S3 bucket name to ensure uniqueness"
+  default     = "my-app-bucket"
+}
+
+variable "domain_name" {
+  type        = string
+  description = "Domain name for Route 53 configuration"
+}
+
+variable "subdomain" {
+  type        = string
+  description = "Subdomain to use for the application Route 53 A record"
+  default     = "app"
+}
+
+variable "s3_bucket_name" {
+  description = "The name of the S3 bucket"
+  type        = string
+}
+
+variable "record_type" {
+  description = "The type of the DNS record"
+  type        = string
+  default     = "A" # You can change this default value if needed
+}
+
+variable "ttl" {
+  description = "Time to live for the DNS record in seconds"
+  type        = number
+  default     = 60 # Default TTL value
 }

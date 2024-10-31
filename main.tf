@@ -191,7 +191,6 @@ resource "aws_db_instance" "my_rds_instance" {
   parameter_group_name   = aws_db_parameter_group.my_db_parameter_group.name
   skip_final_snapshot    = true
 
-
   tags = {
     Name = "csye6225-rds-instance"
   }
@@ -203,6 +202,9 @@ resource "aws_instance" "app_instance" {
   instance_type          = var.instance_type
   subnet_id              = aws_subnet.public_subnets[0].id
   vpc_security_group_ids = [aws_security_group.app_security_group.id]
+  iam_instance_profile   = aws_iam_instance_profile.s3_access_profile.name
+
+
 
   root_block_device {
     volume_type           = "gp2"
@@ -212,32 +214,35 @@ resource "aws_instance" "app_instance" {
 
   disable_api_termination = false
 
-
   user_data = base64encode(<<EOF
 #!/bin/bash
+
+
 # Create the .env file with database environment variables
-cat <<EOT >> /opt/webapp/webapp/.env
+cat <<EOT >> /opt/.env
 MYSQL_HOST="${aws_db_instance.my_rds_instance.address}"
 MYSQL_USER="csye6225"
 MYSQL_PASSWORD="${var.db_password}"
 MYSQL_DATABASE="csye6225"
 PORT="5000"
+AWS_REGION="${var.aws_region}"                          # AWS region variable
+BUCKET_NAME="${aws_s3_bucket.my_bucket.id}"            # S3 Bucket name
 
 EOT
 
 # Set permissions for the .env file to ensure it's accessible by the webapp user
-sudo chown csye6225:csye6225 /opt/webapp/webapp/.env
-sudo chmod 600 /opt/webapp/webapp/.env
+sudo chown csye6225:csye6225 /opt/.env
+sudo chmod 600 /opt/.env
 
-# Restart the web application to pick up the new environment variables
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+    -a fetch-config -m ec2 -c file:/opt/packer/cloudwatch-config.json -s
+
+# Restart the web application and CloudWatch agent
 sudo systemctl daemon-reload
 sudo systemctl restart webapp.service
+
 EOF
   )
-
-
-
-
 
   tags = {
     Name = "app-instance"
@@ -247,4 +252,159 @@ EOF
 # Output DB Endpoint
 output "db_endpoint" {
   value = aws_db_instance.my_rds_instance.endpoint
+}
+
+# S3 Bucket and IAM Role/Policy
+
+resource "random_id" "bucket_name" {
+  byte_length = 7
+}
+
+resource "aws_s3_bucket" "my_bucket" {
+  bucket = "my-app-bucket-${random_id.bucket_name.hex}"
+
+
+
+
+  force_destroy = true # Allow bucket deletion even if not empty
+
+  tags = {
+    Name        = "my-app-bucket"
+    Environment = var.environment_tag
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "my_bucket_lifecycle" {
+  bucket = aws_s3_bucket.my_bucket.id
+
+  rule {
+    id     = "expire-old-objects"
+    status = "Enabled"
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    expiration {
+      days = 365 # Adjust this if needed
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "my_bucket_encryption" {
+  bucket = aws_s3_bucket.my_bucket.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+# Define IAM role for EC2 instance to access S3
+resource "aws_iam_role" "s3_access_role" {
+  name = "s3-access-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+# Attach policy to IAM role
+resource "aws_iam_role_policy" "s3_access_policy" {
+  name = "s3-access-policy"
+  role = aws_iam_role.s3_access_role.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "s3:ListBucket",
+          "s3:GetObject",
+          "s3:PutObject"
+        ]
+        Effect = "Allow"
+        Resource = [
+          aws_s3_bucket.my_bucket.arn,
+          "${aws_s3_bucket.my_bucket.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# Define policy for CloudWatch Agent
+resource "aws_iam_role_policy" "cloudwatch_agent_policy" {
+  name = "cloudwatch-agent-policy"
+  role = aws_iam_role.s3_access_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeTags",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams",
+          "logs:DescribeLogGroups",
+          "logs:CreateLogStream",
+          "logs:CreateLogGroup"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ssm:GetParameter"
+        ]
+        Resource = "arn:aws:ssm:*:*:parameter/AmazonCloudWatch-*"
+      }
+    ]
+  })
+}
+
+# Associate the IAM role with EC2 instance profile
+resource "aws_iam_instance_profile" "s3_access_profile" {
+  name = "s3-access-profile"
+  role = aws_iam_role.s3_access_role.name
+}
+
+# Route 53 Zone for Domain (retrieve existing zone)
+data "aws_route53_zone" "selected_zone" {
+  name         = "${var.subdomain}.${var.domain_name}"
+  private_zone = false
+}
+
+# Route 53 A Record for EC2 instance
+resource "aws_route53_record" "app_a_record" {
+  zone_id = data.aws_route53_zone.selected_zone.zone_id
+  name    = "${var.subdomain}.${var.domain_name}"
+  type    = var.record_type # Use the variable for record type
+  ttl     = var.ttl         # Use the variable for TTL
+  records = [aws_instance.app_instance.public_ip]
+
+  depends_on = [aws_instance.app_instance]
+
+  # tags = {
+  #   Name        = "app-a-record"
+  #   Environment = var.environment_tag
+  # }
+}
+
+# Output application URL
+output "app_url" {
+  value       = "http://${aws_route53_record.app_a_record.fqdn}:${var.application_port}/"
+  description = "URL to access the application."
 }
