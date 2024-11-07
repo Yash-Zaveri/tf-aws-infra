@@ -88,10 +88,10 @@ resource "aws_security_group" "app_security_group" {
   name   = "app-security-group"
 
   ingress {
-    from_port   = var.application_port
-    to_port     = var.application_port
-    protocol    = "tcp"
-    security_groups =  [aws_security_group.lb_security_group.id]
+    from_port       = var.application_port
+    to_port         = var.application_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.lb_security_group.id]
   }
 
   ingress {
@@ -188,7 +188,7 @@ resource "aws_db_instance" "my_rds_instance" {
 
 # Launch Template
 resource "aws_launch_template" "app_launch_template" {
-  name   = "web-app-launch-template"
+  name          = "web-app-launch-template"
   image_id      = var.custom_ami_id
   instance_type = var.instance_type
   # key_name      = var.aws_key_name
@@ -198,7 +198,7 @@ resource "aws_launch_template" "app_launch_template" {
   }
 
   network_interfaces {
-    security_groups = [aws_security_group.app_security_group.id]
+    security_groups             = [aws_security_group.app_security_group.id]
     associate_public_ip_address = true
   }
 
@@ -241,7 +241,7 @@ EOF
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
-  
+
 
   desired_capacity    = 3
   min_size            = 3
@@ -259,7 +259,7 @@ resource "aws_autoscaling_group" "app_asg" {
     propagate_at_launch = true
   }
 
-  target_group_arns = [aws_lb_target_group.app_target_group.arn]
+  target_group_arns         = [aws_lb_target_group.app_target_group.arn]
   health_check_type         = "EC2"
   health_check_grace_period = 300
   # wait_for_capacity_timeout = "0"
@@ -268,14 +268,14 @@ resource "aws_autoscaling_group" "app_asg" {
 
 # Auto Scaling Policies
 resource "aws_autoscaling_policy" "scale_up" {
-  name                   = "scale_up_policy"
-  scaling_adjustment     = 1
-  adjustment_type        = "ChangeInCapacity"
-  cooldown               = 60
-  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  name                    = "scale_up_policy"
+  scaling_adjustment      = 1
+  adjustment_type         = "ChangeInCapacity"
+  cooldown                = 60
+  autoscaling_group_name  = aws_autoscaling_group.app_asg.name
   metric_aggregation_type = "Average"
 
-  
+
 }
 
 # CloudWatch Alarms for Auto Scaling
@@ -295,12 +295,12 @@ resource "aws_cloudwatch_metric_alarm" "high_cpu" {
 }
 
 resource "aws_autoscaling_policy" "scale_down" {
-  name                   = "scale_down_policy"
-  scaling_adjustment     = -1
-  adjustment_type        = "ChangeInCapacity"
-  cooldown               = 60
-  autoscaling_group_name = aws_autoscaling_group.app_asg.name
- metric_aggregation_type = "Average"
+  name                    = "scale_down_policy"
+  scaling_adjustment      = -1
+  adjustment_type         = "ChangeInCapacity"
+  cooldown                = 60
+  autoscaling_group_name  = aws_autoscaling_group.app_asg.name
+  metric_aggregation_type = "Average"
   # depends_on = [aws_autoscaling_group.app_asg]
 }
 
@@ -492,13 +492,13 @@ resource "aws_route53_record" "app_a_record" {
   zone_id = data.aws_route53_zone.selected_zone.zone_id
   name    = "${var.subdomain}.${var.domain_name}"
   type    = var.record_type # Use the variable for record type
-  
+
   alias {
     name                   = aws_lb.app_load_balancer.dns_name
     zone_id                = aws_lb.app_load_balancer.zone_id
     evaluate_target_health = true
   }
-   depends_on = [aws_lb.app_load_balancer]
+  depends_on = [aws_lb.app_load_balancer]
   # tags = {
   #   Name        = "app-a-record"
   #   Environment = var.environment_tag
