@@ -80,6 +80,8 @@ resource "aws_route_table_association" "private_associations" {
   route_table_id = aws_route_table.private_route_table.id
 }
 
+
+
 # Application Security Group
 resource "aws_security_group" "app_security_group" {
   vpc_id = aws_vpc.my_vpc.id
@@ -89,25 +91,12 @@ resource "aws_security_group" "app_security_group" {
     from_port   = var.application_port
     to_port     = var.application_port
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    security_groups =  [aws_security_group.lb_security_group.id]
   }
+
   ingress {
     from_port   = 22
     to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    from_port   = 443
-    to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -181,6 +170,7 @@ resource "aws_db_instance" "my_rds_instance" {
   engine                 = "mysql"
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
+  storage_type           = "gp2"
   db_name                = "csye6225"
   username               = "csye6225"
   password               = var.db_password
@@ -196,23 +186,26 @@ resource "aws_db_instance" "my_rds_instance" {
   }
 }
 
-# EC2 Instance with User Data to auto-configure DB connection
-resource "aws_instance" "app_instance" {
-  ami                    = var.custom_ami_id
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.public_subnets[0].id
-  vpc_security_group_ids = [aws_security_group.app_security_group.id]
-  iam_instance_profile   = aws_iam_instance_profile.s3_access_profile.name
+# Launch Template
+resource "aws_launch_template" "app_launch_template" {
+  name   = "web-app-launch-template"
+  image_id      = var.custom_ami_id
+  instance_type = var.instance_type
+  # key_name      = var.aws_key_name
 
-
-
-  root_block_device {
-    volume_type           = "gp2"
-    volume_size           = var.root_volume_size
-    delete_on_termination = true
+  iam_instance_profile {
+    name = aws_iam_instance_profile.s3_access_profile.name
   }
 
-  disable_api_termination = false
+  network_interfaces {
+    security_groups = [aws_security_group.app_security_group.id]
+    associate_public_ip_address = true
+  }
+
+
+  # lifecycle {
+  #   create_before_destroy = true
+  # }
 
   user_data = base64encode(<<EOF
 #!/bin/bash
@@ -244,14 +237,88 @@ sudo systemctl restart webapp.service
 EOF
   )
 
-  tags = {
-    Name = "app-instance"
+}
+
+# Auto Scaling Group
+resource "aws_autoscaling_group" "app_asg" {
+  
+
+  desired_capacity    = 3
+  min_size            = 3
+  max_size            = 5
+  vpc_zone_identifier = aws_subnet.public_subnets[*].id
+
+  launch_template {
+    id      = aws_launch_template.app_launch_template.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "AutoScalingGroup"
+    propagate_at_launch = true
+  }
+
+  target_group_arns = [aws_lb_target_group.app_target_group.arn]
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+  # wait_for_capacity_timeout = "0"
+}
+
+
+# Auto Scaling Policies
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "scale_up_policy"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+  metric_aggregation_type = "Average"
+
+  
+}
+
+# CloudWatch Alarms for Auto Scaling
+resource "aws_cloudwatch_metric_alarm" "high_cpu" {
+  alarm_name          = "high_cpu_alarm"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 12
+  alarm_actions       = [aws_autoscaling_policy.scale_up.arn]
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
   }
 }
 
-# Output DB Endpoint
-output "db_endpoint" {
-  value = aws_db_instance.my_rds_instance.endpoint
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "scale_down_policy"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown               = 60
+  autoscaling_group_name = aws_autoscaling_group.app_asg.name
+ metric_aggregation_type = "Average"
+  # depends_on = [aws_autoscaling_group.app_asg]
+}
+
+
+
+resource "aws_cloudwatch_metric_alarm" "low_cpu" {
+  alarm_name          = "low_cpu_alarm"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = 60
+  statistic           = "Average"
+  threshold           = 8
+  alarm_actions       = [aws_autoscaling_policy.scale_down.arn]
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.app_asg.name
+  }
 }
 
 # S3 Bucket and IAM Role/Policy
@@ -262,9 +329,6 @@ resource "random_id" "bucket_name" {
 
 resource "aws_s3_bucket" "my_bucket" {
   bucket = "my-app-bucket-${random_id.bucket_name.hex}"
-
-
-
 
   force_destroy = true # Allow bucket deletion even if not empty
 
@@ -301,6 +365,15 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "my_bucket_encrypt
     }
   }
 }
+
+resource "aws_s3_bucket_public_access_block" "s3_bucket_public_access_block" {
+  bucket = aws_s3_bucket.my_bucket.bucket
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
 # Define IAM role for EC2 instance to access S3
 resource "aws_iam_role" "s3_access_role" {
   name = "s3-access-role"
@@ -319,20 +392,22 @@ resource "aws_iam_role" "s3_access_role" {
   })
 }
 
-# Attach policy to IAM role
-resource "aws_iam_role_policy" "s3_access_policy" {
-  name = "s3-access-policy"
-  role = aws_iam_role.s3_access_role.id
+# IAM Policy for S3 Bucket Access (Allow EC2 to interact with S3)
+resource "aws_iam_policy" "s3_access_policy" {
+  name        = "s3-access-policy"
+  description = "Policy to allow access to S3 Bucket"
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Action = [
-          "s3:ListBucket",
-          "s3:GetObject",
-          "s3:PutObject"
-        ]
         Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
         Resource = [
           aws_s3_bucket.my_bucket.arn,
           "${aws_s3_bucket.my_bucket.arn}/*"
@@ -342,10 +417,10 @@ resource "aws_iam_role_policy" "s3_access_policy" {
   })
 }
 
-# Define policy for CloudWatch Agent
-resource "aws_iam_role_policy" "cloudwatch_agent_policy" {
-  name = "cloudwatch-agent-policy"
-  role = aws_iam_role.s3_access_role.id
+# IAM Policy for CloudWatch Agent Access (Allow EC2 to push logs and metrics to CloudWatch)
+resource "aws_iam_policy" "cloudwatch_agent_policy" {
+  name        = "cloudwatch-agent-policy"
+  description = "Policy to allow CloudWatch Agent to push logs and metrics"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -354,13 +429,12 @@ resource "aws_iam_role_policy" "cloudwatch_agent_policy" {
         Effect = "Allow"
         Action = [
           "cloudwatch:PutMetricData",
-          "ec2:DescribeVolumes",
-          "ec2:DescribeTags",
-          "logs:PutLogEvents",
-          "logs:DescribeLogStreams",
-          "logs:DescribeLogGroups",
+          "cloudwatch:GetMetricStatistics",
+          "cloudwatch:ListMetrics",
+          "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:CreateLogGroup"
+          "logs:PutLogEvents",
+          "logs:*"
         ]
         Resource = "*"
       },
@@ -375,11 +449,37 @@ resource "aws_iam_role_policy" "cloudwatch_agent_policy" {
   })
 }
 
-# Associate the IAM role with EC2 instance profile
+# Attaching the S3 access policy to the IAM role
+resource "aws_iam_policy_attachment" "s3_policy_attachment" {
+  name       = "s3-policy-attachment"
+  roles      = [aws_iam_role.s3_access_role.name]
+  policy_arn = aws_iam_policy.s3_access_policy.arn
+}
+
+# Attaching the CloudWatch agent policy to the IAM role
+resource "aws_iam_policy_attachment" "cloudwatch_policy_attachment" {
+  name       = "cloudwatch-policy-attachment"
+  roles      = [aws_iam_role.s3_access_role.name]
+  policy_arn = aws_iam_policy.cloudwatch_agent_policy.arn
+}
+
+# Create the IAM instance profile for EC2 to use this role
 resource "aws_iam_instance_profile" "s3_access_profile" {
   name = "s3-access-profile"
   role = aws_iam_role.s3_access_role.name
 }
+
+# # Example EC2 instance that uses the IAM instance profile
+# resource "aws_instance" "my_ec2_instance" {
+#   ami             = var.custom_ami_id
+#   instance_type   = var.instance_type
+#   iam_instance_profile = aws_iam_instance_profile.s3_access_profile.name
+
+#   tags = {
+#     Name = "WebApp-Instance"
+#   }
+# }
+
 
 # Route 53 Zone for Domain (retrieve existing zone)
 data "aws_route53_zone" "selected_zone" {
@@ -392,15 +492,127 @@ resource "aws_route53_record" "app_a_record" {
   zone_id = data.aws_route53_zone.selected_zone.zone_id
   name    = "${var.subdomain}.${var.domain_name}"
   type    = var.record_type # Use the variable for record type
-  ttl     = var.ttl         # Use the variable for TTL
-  records = [aws_instance.app_instance.public_ip]
-
-  depends_on = [aws_instance.app_instance]
-
+  
+  alias {
+    name                   = aws_lb.app_load_balancer.dns_name
+    zone_id                = aws_lb.app_load_balancer.zone_id
+    evaluate_target_health = true
+  }
+   depends_on = [aws_lb.app_load_balancer]
   # tags = {
   #   Name        = "app-a-record"
   #   Environment = var.environment_tag
   # }
+}
+
+# Load Balancer Security Group
+resource "aws_security_group" "lb_security_group" {
+  vpc_id = aws_vpc.my_vpc.id
+  name   = "load-balancer-security-group"
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name        = "load-balancer-security-group"
+    Environment = var.environment_tag
+  }
+}
+
+
+# Application Load Balancer
+resource "aws_lb" "app_load_balancer" {
+  name               = "my-app-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.lb_security_group.id]
+  subnets            = [for subnet in aws_subnet.public_subnets : subnet.id]
+
+  # enable_deletion_protection = false
+
+  tags = {
+    Name        = "app-load-balancer"
+    Environment = var.environment_tag
+  }
+}
+
+# IAM Role for Auto-Scaling Group
+resource "aws_iam_role" "autoscaling_role" {
+  name = "autoscaling-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Service = "autoscaling.amazonaws.com"
+        },
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+}
+
+
+# Target Group for Load Balancer
+resource "aws_lb_target_group" "app_target_group" {
+  name     = "app-target-group"
+  port     = var.application_port
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.my_vpc.id
+
+  health_check {
+    enabled             = true
+    path                = "/healthz"
+    port                = var.application_port
+    protocol            = "HTTP"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 10
+    unhealthy_threshold = 10
+  }
+
+  tags = {
+    Name        = "app-target-group"
+    Environment = var.environment_tag
+  }
+}
+
+# Load Balancer Listener
+resource "aws_lb_listener" "app_lb_listener" {
+  load_balancer_arn = aws_lb.app_load_balancer.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_target_group.arn
+  }
+}
+
+
+
+# Output DB Endpoint
+output "db_endpoint" {
+  value = aws_db_instance.my_rds_instance.endpoint
 }
 
 # Output application URL
