@@ -220,6 +220,8 @@ MYSQL_DATABASE="csye6225"
 PORT="5000"
 AWS_REGION="${var.aws_region}"                          # AWS region variable
 BUCKET_NAME="${aws_s3_bucket.my_bucket.id}"            # S3 Bucket name
+SNS_TOPIC_ARN="${aws_sns_topic.email_notifications.arn}"  # Added SNS topic ARN
+
 
 EOT
 
@@ -622,4 +624,170 @@ output "db_endpoint" {
 output "app_url" {
   value       = "http://${aws_route53_record.app_a_record.fqdn}:${var.application_port}/"
   description = "URL to access the application."
+}
+
+
+
+
+# IAM Role for Lambda
+resource "aws_iam_role" "lambda_execution_role" {
+  name = "lambda_execution_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+# IAM Policy for Lambda to access SNS, Secrets Manager, and database credentials
+resource "aws_iam_policy" "lambda_policy" {
+  name        = "lambda_policy"
+  description = "Policy that allow Lambda function to access SNS, RDS, and CloudWatch."
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "sns:Publish",
+          "cloudwatch:PutMetricData",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "rds:DescribeDBInstances",
+          "rds:DescribeDBClusters",
+          "rds:ListTagsForResource",
+          "rds:DescribeDBClusterSnapshots",
+          "rds:DescribeDBSnapshots",
+          "rds-db:connect"
+        ],
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["ses:SendEmail", "ses:SendRawEmail"],
+        Resource = "*"
+      }
+
+    ]
+  })
+}
+
+# Attach policy to Lambda execution role
+resource "aws_iam_role_policy_attachment" "lambda_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_policy.arn
+}
+
+# Lambda Function to handle SNS notifications
+resource "aws_lambda_function" "email_notifications" {
+  # filename         = "serverless.zip" # Replace with the path to your zipped project
+  s3_bucket     = var.s3_bucket
+  s3_key        = var.s3_key
+  function_name = "sns-email-handler"
+  role          = aws_iam_role.lambda_execution_role.arn
+  handler       = "serverless/index.handler" # Update handler path as per your code structure
+  # source_code_hash = filebase64sha256("serverless.zip")
+  runtime = "nodejs20.x"
+
+
+
+
+  environment {
+    variables = {
+
+      SENDGRID_API_KEY = var.sendgrid_api_key
+      BASE_URL         = "demo.yashzaveri.me"
+      SNS_TOPIC_ARN    = aws_sns_topic.email_notifications.arn
+      # Add other environment variables from your .env if needed
+    }
+  }
+
+}
+
+# SNS Topic Subscription for Lambda
+resource "aws_sns_topic_subscription" "lambda_sns_subscription" {
+  topic_arn = aws_sns_topic.email_notifications.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.email_notifications.arn
+}
+
+# Grant Lambda permission to be invoked by SNS
+resource "aws_lambda_permission" "allow_sns_invocation" {
+  statement_id  = "AllowExecutionFromSNS"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.email_notifications.arn
+  principal     = "sns.amazonaws.com"
+  source_arn    = aws_sns_topic.email_notifications.arn
+}
+resource "aws_iam_policy" "lambda_s3_access_policy" {
+  name = "LambdaS3AccessPolicy"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect   = "Allow",
+        Action   = "s3:GetObject",
+        Resource = "arn:aws:s3:::email-code-bucket/send_email.zip"
+      }
+    ]
+  })
+}
+resource "aws_iam_role_policy_attachment" "lambda_s3_access_policy_attachment" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_s3_access_policy.arn
+}
+
+# SNS Topic for notifications
+resource "aws_sns_topic" "email_notifications" {
+  name = "email-notifications-topic"
+  tags = {
+    Name = "email-notifications-topic"
+  }
+}
+
+
+
+
+
+# IAM Role for EC2 with SNS Publish Permissions
+
+# Define the IAM Policy to allow EC2 to publish messages to the specified SNS topic
+resource "aws_iam_policy" "ec2_sns_publish" {
+  name = "ec2_sns_publish"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sns:Publish",
+        ]
+        Effect   = "Allow"
+        Resource = aws_sns_topic.email_notifications.arn
+      },
+    ]
+  })
+}
+
+# Attach the above policy to the EC2 role
+resource "aws_iam_policy_attachment" "ec2_sns_publish" {
+  name       = "ec2_sns_publish"
+  roles      = [aws_iam_role.s3_access_role.name]
+  policy_arn = aws_iam_policy.ec2_sns_publish.arn
 }

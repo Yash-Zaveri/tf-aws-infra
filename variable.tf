@@ -110,3 +110,20 @@ variable "ttl" {
   type        = number
   default     = 60 # Default TTL value
 }
+
+variable "sendgrid_api_key" {
+  description = "SendGrid API key for sending emails"
+  type        = string
+  sensitive   = true
+}
+
+
+variable "s3_bucket" {
+  description = "S3 Bucket Name For Email Zip"
+  type        = string
+}
+
+variable "s3_key" {
+  description = "Bucket Key Name Having Email Zip"
+  type        = string
+}
