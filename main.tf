@@ -244,7 +244,7 @@ EOF
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
 
-
+  name                = "csye6225"
   desired_capacity    = 3
   min_size            = 3
   max_size            = 5
@@ -743,7 +743,7 @@ resource "aws_iam_policy" "lambda_s3_access_policy" {
       {
         Effect   = "Allow",
         Action   = "s3:GetObject",
-        Resource = "arn:aws:s3:::email-code-bucket/send_email.zip"
+        Resource = "arn:aws:s3:::email-code-buckets/serverless.zip"
       }
     ]
   })
