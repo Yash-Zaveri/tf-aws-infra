@@ -295,13 +295,13 @@ EOF
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
 
-  name = "csye6225"
-  # desired_capacity    = 3
-  # min_size            = 3
-  # max_size            = 5
-  desired_capacity    = 1
-  min_size            = 1
-  max_size            = 1
+  name             = "csye6225"
+  desired_capacity = 3
+  min_size         = 3
+  max_size         = 5
+  # desired_capacity    = 1
+  # min_size            = 1
+  # max_size            = 1
   vpc_zone_identifier = aws_subnet.public_subnets[*].id
 
   launch_template {
