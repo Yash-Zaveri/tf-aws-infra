@@ -2,8 +2,6 @@
 
 ##Assignment A09
 
-update
- 
 
 
 ## SSL Certificate Import for Demo Environment
