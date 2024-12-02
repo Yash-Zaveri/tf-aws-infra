@@ -148,6 +148,11 @@ resource "aws_db_parameter_group" "my_db_parameter_group" {
     name  = "max_connections"
     value = "100"
   }
+  parameter {
+    name         = "general_log"
+    value        = "1"
+    apply_method = "pending-reboot"
+  }
 
   tags = {
     Name = "my-db-param-group"
@@ -166,20 +171,29 @@ resource "aws_db_subnet_group" "private_subnets" {
 
 # RDS Instance (MySQL)
 resource "aws_db_instance" "my_rds_instance" {
-  identifier             = "csye6225"
-  engine                 = "mysql"
-  instance_class         = "db.t3.micro"
-  allocated_storage      = 20
-  storage_type           = "gp2"
-  db_name                = "csye6225"
-  username               = "csye6225"
-  password               = var.db_password
-  multi_az               = false
-  publicly_accessible    = false
-  vpc_security_group_ids = [aws_security_group.db_security_group.id]
+  identifier        = "csye6225"
+  engine            = "mysql"
+  instance_class    = "db.t3.micro"
+  allocated_storage = 20
+  storage_type      = "gp2"
+  multi_az          = false
+  db_name           = "csye6225"
+  username          = "csye6225"
+  # password            = var.db_password
+  password = random_password.db_password.result
+  # password            = jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password
   db_subnet_group_name   = aws_db_subnet_group.private_subnets.name
+  vpc_security_group_ids = [aws_security_group.db_security_group.id]
   parameter_group_name   = aws_db_parameter_group.my_db_parameter_group.name
+  publicly_accessible    = false
   skip_final_snapshot    = true
+  kms_key_id             = aws_kms_key.rds_kms_key.arn # Using RDS KMS Key // New Assignmnet 9
+  storage_encrypted      = true                        # // New Assignmnet 9
+
+
+
+
+  # apply_immediately = true # comment for chaitya
 
   tags = {
     Name = "csye6225-rds-instance"
@@ -201,7 +215,21 @@ resource "aws_launch_template" "app_launch_template" {
     security_groups             = [aws_security_group.app_security_group.id]
     associate_public_ip_address = true
   }
+  # New Assignmnet 9
 
+  # disable_api_termination = false # comment for chaitya
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      delete_on_termination = true
+      volume_size           = 50
+      volume_type           = "gp2"
+      encrypted             = true
+      kms_key_id            = aws_kms_key.ec2_kms_key.arn
+    }
+  }
 
   # lifecycle {
   #   create_before_destroy = true
@@ -210,18 +238,38 @@ resource "aws_launch_template" "app_launch_template" {
   user_data = base64encode(<<EOF
 #!/bin/bash
 
+# Install MySQL client (if not already installed)
+sudo apt update
+sudo apt install -y mysql-client
+
+# Fetch the password from AWS Secrets Manager for the DB password
+NEW_PASSWORD=$(aws secretsmanager get-secret-value --secret-id db-password --query 'SecretString' --output text | jq -r '.password')
+
+# Set MySQL connection details
+DB_HOST="${aws_db_instance.my_rds_instance.address}"
+DB_ADMIN_USER="${var.db_user}"  # Replace with your admin username
+DB_ADMIN_PASSWORD="${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"  # Replace with the admin password
+DB_NAME="csye6225"
+NEW_USER="csye6225"
+# NEW_PASSWORD="${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"  # Replace with the new user's password
+
+# Create a new user and grant full access
+mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASSWORD" <<SQL
+CREATE USER IF NOT EXISTS '$NEW_USER'@'%' IDENTIFIED BY '$NEW_PASSWORD';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$NEW_USER'@'%';
+FLUSH PRIVILEGES;
+SQL
 
 # Create the .env file with database environment variables
 cat <<EOT >> /opt/.env
-MYSQL_HOST="${aws_db_instance.my_rds_instance.address}"
-MYSQL_USER="csye6225"
-MYSQL_PASSWORD="${var.db_password}"
-MYSQL_DATABASE="csye6225"
+MYSQL_HOST="$DB_HOST"
+MYSQL_USER="$NEW_USER"
+MYSQL_PASSWORD="$NEW_PASSWORD"
+MYSQL_DATABASE="$DB_NAME"
 PORT="5000"
 AWS_REGION="${var.aws_region}"                          # AWS region variable
 BUCKET_NAME="${aws_s3_bucket.my_bucket.id}"            # S3 Bucket name
 SNS_TOPIC_ARN="${aws_sns_topic.email_notifications.arn}"  # Added SNS topic ARN
-
 
 EOT
 
@@ -234,6 +282,9 @@ sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
 
 # Restart the web application and CloudWatch agent
 sudo systemctl daemon-reload
+sudo systemctl enable webapp.service
+sudo systemctl start webapp.service
+
 sudo systemctl restart webapp.service
 
 EOF
@@ -244,26 +295,28 @@ EOF
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
 
-  name                = "csye6225"
-  desired_capacity    = 3
-  min_size            = 3
-  max_size            = 5
+  name = "csye6225"
+  # desired_capacity    = 3
+  # min_size            = 3
+  # max_size            = 5
+  desired_capacity    = 1
+  min_size            = 1
+  max_size            = 1
   vpc_zone_identifier = aws_subnet.public_subnets[*].id
 
   launch_template {
     id      = aws_launch_template.app_launch_template.id
     version = "$Latest"
   }
-
+  target_group_arns         = [aws_lb_target_group.app_target_group.arn]
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
   tag {
     key                 = "Name"
     value               = "AutoScalingGroup"
     propagate_at_launch = true
   }
 
-  target_group_arns         = [aws_lb_target_group.app_target_group.arn]
-  health_check_type         = "EC2"
-  health_check_grace_period = 300
   # wait_for_capacity_timeout = "0"
 }
 
@@ -341,12 +394,12 @@ resource "aws_s3_bucket" "my_bucket" {
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "my_bucket_lifecycle" {
-  bucket = aws_s3_bucket.my_bucket.id
+  bucket = aws_s3_bucket.my_bucket.bucket
 
   rule {
     id     = "expire-old-objects"
     status = "Enabled"
-
+    filter {}
     transition {
       days          = 30
       storage_class = "STANDARD_IA"
@@ -363,7 +416,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "my_bucket_encrypt
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      # sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.s3_kms_key.arn # New Assignmnet 9
     }
   }
 }
@@ -384,11 +439,12 @@ resource "aws_iam_role" "s3_access_role" {
     Version = "2012-10-17"
     Statement = [
       {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
+        Action = "sts:AssumeRole",
+        Effect = "Allow",
         Principal = {
           Service = "ec2.amazonaws.com"
-        }
+        },
+        Sid = "RoleForEC2"
       },
     ]
   })
@@ -403,6 +459,15 @@ resource "aws_iam_policy" "s3_access_policy" {
     Version = "2012-10-17"
     Statement = [
       {
+        Effect = "Allow",
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:DescribeKey"
+        ],
+        Resource = "arn:aws:kms:us-east-1:${data.aws_caller_identity.current.account_id}:key/${aws_kms_key.s3_kms_key.key_id}"
+        }, {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
@@ -600,19 +665,30 @@ resource "aws_lb_target_group" "app_target_group" {
     Environment = var.environment_tag
   }
 }
+# new changes Assignment 9 
+# Load Balancer Listener 
 
-# Load Balancer Listener
+# comment for chaitya
+# data "aws_acm_certificate" "issued" {
+#   domain   = "${var.subdomain}.${var.domain_name}"
+#   statuses = ["ISSUED"]
+# }
+
+
 resource "aws_lb_listener" "app_lb_listener" {
   load_balancer_arn = aws_lb.app_load_balancer.arn
-  port              = 80
-  protocol          = "HTTP"
-
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  # certificate_arn   = data.aws_acm_certificate.issued.arn # comment for chaitya
+  certificate_arn = var.certificate_arn
+  # certificate_arn = "arn:aws:acm:us-east-1:396913738235:certificate/30162d3c-89b6-4717-8f2d-6448ae9fc02e"
+  # certificate_arn = "arn:aws:acm:us-east-1:688567271402:certificate/60deb7f9-cd67-4b1b-bb3d-d20febeb09da"  #dev certificate
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app_target_group.arn
   }
 }
-
 
 
 # Output DB Endpoint
@@ -627,6 +703,45 @@ output "app_url" {
 }
 
 
+
+# SNS Topic for notifications
+resource "aws_sns_topic" "email_notifications" {
+  name = "email-notifications-topic"
+  tags = {
+    Name = "email-notifications-topic"
+  }
+}
+
+
+
+
+
+# IAM Role for EC2 with SNS Publish Permissions
+
+# Define the IAM Policy to allow EC2 to publish messages to the specified SNS topic
+resource "aws_iam_policy" "ec2_sns_publish" {
+  name = "ec2_sns_publish"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sns:Publish",
+        ]
+        Effect   = "Allow"
+        Resource = aws_sns_topic.email_notifications.arn
+      },
+    ]
+  })
+}
+
+# Attach the above policy to the EC2 role
+resource "aws_iam_policy_attachment" "ec2_sns_publish" {
+  name       = "ec2_sns_publish"
+  roles      = [aws_iam_role.s3_access_role.name]
+  policy_arn = aws_iam_policy.ec2_sns_publish.arn
+}
 
 
 # IAM Role for Lambda
@@ -714,6 +829,8 @@ resource "aws_lambda_function" "email_notifications" {
       SENDGRID_API_KEY = var.sendgrid_api_key
       BASE_URL         = "demo.yashzaveri.me"
       SNS_TOPIC_ARN    = aws_sns_topic.email_notifications.arn
+      # AWS_REGION    = var.aws_region
+
       # Add other environment variables from your .env if needed
     }
   }
@@ -731,7 +848,7 @@ resource "aws_sns_topic_subscription" "lambda_sns_subscription" {
 resource "aws_lambda_permission" "allow_sns_invocation" {
   statement_id  = "AllowExecutionFromSNS"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.email_notifications.arn
+  function_name = aws_lambda_function.email_notifications.function_name
   principal     = "sns.amazonaws.com"
   source_arn    = aws_sns_topic.email_notifications.arn
 }
@@ -743,7 +860,7 @@ resource "aws_iam_policy" "lambda_s3_access_policy" {
       {
         Effect   = "Allow",
         Action   = "s3:GetObject",
-        Resource = "arn:aws:s3:::email-code-buckets/serverless.zip"
+        Resource = [for bucket in var.buckets : "arn:aws:s3:::${bucket}/*"]
       }
     ]
   })
@@ -753,41 +870,469 @@ resource "aws_iam_role_policy_attachment" "lambda_s3_access_policy_attachment" {
   policy_arn = aws_iam_policy.lambda_s3_access_policy.arn
 }
 
-# SNS Topic for notifications
-resource "aws_sns_topic" "email_notifications" {
-  name = "email-notifications-topic"
-  tags = {
-    Name = "email-notifications-topic"
-  }
+
+
+# ===================== New Part: AWS KMS Keys =====================
+# KMS Key for EC2
+resource "aws_kms_key" "ec2_kms_key" {
+  description             = "KMS key for EC2"
+  deletion_window_in_days = 7
+  # customer_master_key_spec = "SYMMETRIC_DEFAULT" # comment for chaitya
+  enable_key_rotation = true
+  multi_region        = true
+
+  policy = <<EOF
+{
+    "Id": "key-for-ebs",
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "Enable IAM User Permissions",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::${var.user_account_id}:root"
+            },
+            "Action": "kms:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "Allow access for Key Administrators",
+            "Effect": "Allow",
+            "Principal": {
+               "AWS": "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            },
+            "Action": [
+                "kms:Create*",
+                "kms:Describe*",
+                "kms:Enable*",
+                "kms:List*",
+                "kms:Put*",
+                "kms:Update*",
+                "kms:Revoke*",
+                "kms:Disable*",
+                "kms:Get*",
+                "kms:Delete*",
+                "kms:TagResource",
+                "kms:UntagResource",
+                "kms:ScheduleKeyDeletion",
+                "kms:CancelKeyDeletion"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "Allow use of the key",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            },
+            "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "Allow attachment of persistent resources",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            },
+            "Action": [
+                "kms:CreateGrant",
+                "kms:ListGrants",
+                "kms:RevokeGrant"
+            ],
+            "Resource": "*",
+            "Condition": {
+                "Bool": {
+                    "kms:GrantIsForAWSResource": "true"
+                }
+            }
+        }
+    ]
+}
+EOF
+
+}
+
+data "aws_caller_identity" "current" {}
+
+#  alias for the Ec2 key
+resource "aws_kms_alias" "alias_key_ebs" {
+  name          = "alias/${var.alias_ec2_key}"
+  target_key_id = aws_kms_key.ec2_kms_key.key_id
 }
 
 
+resource "aws_kms_key" "rds_kms_key" {
+  description             = "KMS key for RDS"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  multi_region            = true
+  policy = jsonencode(
+
+    {
+      "Id" : "key-for-rds",
+      "Version" : "2012-10-17",
+      "Statement" : [
+        {
+          "Sid" : "Enable IAM User Permissions",
+          "Effect" : "Allow",
+          "Principal" : {
+            "AWS" : "arn:aws:iam::${var.user_account_id}:root"
+          },
+          "Action" : "kms:*",
+          "Resource" : "*"
+        },
+
+        {
+          "Sid" : "Allow access for Key Administrators",
+          "Effect" : "Allow",
+          "Principal" : {
+            "AWS" : "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+          },
+          "Action" : [
+            "kms:Create*",
+            "kms:Describe*",
+            "kms:Enable*",
+            "kms:List*",
+            "kms:Put*",
+            "kms:Update*",
+            "kms:Revoke*",
+            "kms:Disable*",
+            "kms:Get*",
+            "kms:Delete*",
+            "kms:TagResource",
+            "kms:UntagResource",
+            "kms:ScheduleKeyDeletion",
+            "kms:CancelKeyDeletion"
+          ],
+          "Resource" : "*"
+        }
+        ,
+        {
+          "Sid" : "Allow use of the key",
+          "Effect" : "Allow",
+          "Principal" : {
+            "AWS" : "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+          },
+          "Action" : [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ],
+          "Resource" : "*"
+        },
+        {
+          "Sid" : "Allow attachment of persistent resources",
+          "Effect" : "Allow",
+          "Principal" : {
+            "AWS" : "arn:aws:iam::${var.user_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+          },
+          "Action" : [
+            "kms:CreateGrant",
+            "kms:ListGrants",
+            "kms:RevokeGrant"
+          ],
+          "Resource" : "*",
+          "Condition" : {
+            "Bool" : {
+              "kms:GrantIsForAWSResource" : "true"
+            }
+          }
+        }
+      ]
+    }
+
+  )
+}
+
+#  alias for the RDS volume
+resource "aws_kms_alias" "alias_key_rds" {
+  name          = "alias/${var.alias_rds_key}"
+  target_key_id = aws_kms_key.rds_kms_key.id
+}
 
 
+# resource "aws_kms_alias" "rds_kms_key_alias" {
+#   name          = "alias/RDSKey"
+#   target_key_id = aws_kms_key.rds_kms_key.key_id
+# }
 
-# IAM Role for EC2 with SNS Publish Permissions
+resource "aws_kms_key" "s3_kms_key" {
+  description             = "KMS_key_for_S3_bucket"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  multi_region            = true
+}
 
-# Define the IAM Policy to allow EC2 to publish messages to the specified SNS topic
-resource "aws_iam_policy" "ec2_sns_publish" {
-  name = "ec2_sns_publish"
-
+resource "aws_kms_key_policy" "s3_kms_key_policy" {
+  key_id = aws_kms_key.s3_kms_key.key_id
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
+    "Version" : "2012-10-17",
+    "Statement" : [
       {
-        Action = [
-          "sns:Publish",
-        ]
-        Effect   = "Allow"
-        Resource = aws_sns_topic.email_notifications.arn
+        "Sid" : "Enable IAM User Permissions",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        "Action" : "kms:*",
+        "Resource" : "*"
       },
+      {
+        "Sid" : "Allow access for Key Administrators",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+        },
+        "Action" : [
+          "kms:Create*",
+          "kms:Describe*",
+          "kms:Enable*",
+          "kms:List*",
+          "kms:Put*",
+          "kms:Update*",
+          "kms:Revoke*",
+          "kms:Disable*",
+          "kms:Get*",
+          "kms:Delete*",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion"
+        ],
+        "Resource" : "*"
+      },
+      {
+        "Sid" : "Allow use of the key for S3",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+        },
+        "Action" : [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        "Resource" : "*"
+      }
     ]
   })
 }
 
-# Attach the above policy to the EC2 role
-resource "aws_iam_policy_attachment" "ec2_sns_publish" {
-  name       = "ec2_sns_publish"
-  roles      = [aws_iam_role.s3_access_role.name]
-  policy_arn = aws_iam_policy.ec2_sns_publish.arn
+resource "aws_kms_alias" "s3_kms_key_alias" {
+  name          = "alias/S3Key"
+  target_key_id = aws_kms_key.s3_kms_key.key_id
 }
+
+# KMS Key for Secret Manager
+resource "aws_kms_key" "secret_manager_key" {
+  description             = "KMS key for Secret Manager"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+  multi_region            = true
+}
+
+resource "aws_kms_key_policy" "secret_manager_key_policy" {
+  key_id = aws_kms_key.secret_manager_key.id
+  policy = jsonencode({
+    "Id" : "key-for-ebs",
+    "Version" : "2012-10-17",
+    "Statement" : [
+      {
+        "Sid" : "Enable IAM User Permissions",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        },
+        "Action" : "kms:*",
+        "Resource" : "*"
+      },
+      {
+        "Sid" : "Allow access for Key Administrators",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+        },
+        "Action" : [
+          "kms:Create*",
+          "kms:Describe*",
+          "kms:Enable*",
+          "kms:List*",
+          "kms:Put*",
+          "kms:Update*",
+          "kms:Revoke*",
+          "kms:Disable*",
+          "kms:Get*",
+          "kms:Delete*",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion"
+        ],
+        "Resource" : "*"
+      },
+      {
+        "Sid" : "Allow use of the key",
+        "Effect" : "Allow",
+        "Principal" : {
+          "AWS" : "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+        },
+        "Action" : [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ],
+        "Resource" : "*"
+      }
+    ]
+  })
+}
+
+
+resource "aws_kms_alias" "secret_manager_key_alias" {
+  name          = "alias/SecretManager"
+  target_key_id = aws_kms_key.secret_manager_key.key_id
+}
+
+# ===================== New Part: AWS KMS Keys ===================== (end)
+
+
+# ===================== Secrets Manager for Storing Database Password =====================
+resource "aws_secretsmanager_secret" "db_password_secret" {
+  name                    = "db-password"
+  description             = "Database password for RDS"
+  kms_key_id              = aws_kms_key.secret_manager_key.arn # Using Secrets Manager KMS Key
+  recovery_window_in_days = 0
+
+  tags = {
+    Name = "db-password-secret"
+  }
+}
+
+resource "random_password" "db_password" {
+  length  = 16
+  special = false
+}
+
+resource "aws_secretsmanager_secret_version" "db_password_secret_version" {
+  secret_id = aws_secretsmanager_secret.db_password_secret.id
+  secret_string = jsonencode({
+    # username = "csye6225"
+    # password = var.db_password
+    password = random_password.db_password.result # Reference the generated password here
+  })
+}
+
+# Data block to fetch the secret version (password) from Secrets Manager
+data "aws_secretsmanager_secret_version" "db_password_secret_version_data" {
+  secret_id  = aws_secretsmanager_secret.db_password_secret.id
+  depends_on = [aws_secretsmanager_secret_version.db_password_secret_version]
+}
+
+# Accessing the password from the data block
+output "db_password_from_secrets_manager" {
+  value     = jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password
+  sensitive = true
+}
+
+# ===================== Secrets Manager for Storing Database Password =====================(end)
+
+# ===================== Email Service Credentials in Secrets Manager =====================
+resource "aws_secretsmanager_secret" "email_service_secret" {
+  name                    = "email-service-credentials"
+  description             = "Credentials for Email Service"
+  kms_key_id              = aws_kms_key.secret_manager_key.arn # Using Secrets Manager KMS Key
+  recovery_window_in_days = 0
+
+  tags = {
+    Name = "email-service-secret"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "email_service_secret_version" {
+  secret_id = aws_secretsmanager_secret.email_service_secret.id
+  secret_string = jsonencode({
+    SENDGRID_API_KEY = var.sendgrid_api_key
+  })
+}
+
+# ===================== Email Service Credentials in Secrets Manager ===================== (end)
+
+# Lambda function retrieves email service credentials dynamically (update Lambda code to use Secrets Manager).
+
+# ===================== Load Balancer SSL Certificate =====================
+# resource "aws_acm_certificate" "dev_ssl_certificate" {
+#   domain_name       = "${var.subdomain}.${var.domain_name}"
+#   validation_method = "DNS"
+
+#   tags = {
+#     Name = "dev-ssl-certificate"
+#   }
+# }
+
+# resource "aws_acm_certificate_validation" "dev_ssl_certificate_validation" {
+#   certificate_arn         = aws_acm_certificate.dev_ssl_certificate.arn
+#   validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+# }
+
+# ===================== Load Balancer SSL Certificate =====================(end)
+
+# Lambda IAM Role Permissions to Access Secrets Manager
+resource "aws_iam_policy" "lambda_secrets_access" {
+  name        = "LambdaSecretsAccessPolicy"
+  description = "Policy for Lambda to access Secrets Manager"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        # Effect = "Allow"
+        # Action = [
+        #   "secretsmanager:GetSecretValue",
+        #   "secretsmanager:DescribeSecret"
+        # ],
+        # Resource = [
+        #   aws_secretsmanager_secret.email_service_secret.arn,
+        #   # aws_secretsmanager_secret.domain.arn
+        # ]
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:ListSecrets"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = "kms:Decrypt",
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Attach Secrets Manager Policy to Lambda Execution Role
+resource "aws_iam_role_policy_attachment" "attach_lambda_secrets_access" {
+  role       = aws_iam_role.lambda_execution_role.name
+  policy_arn = aws_iam_policy.lambda_secrets_access.arn
+}
+
+
+
+
+
+
+
+
+

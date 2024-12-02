@@ -127,3 +127,32 @@ variable "s3_key" {
   description = "Bucket Key Name Having Email Zip"
   type        = string
 }
+
+
+
+variable "buckets" {
+  description = "bucket"
+  type        = list(string)
+
+}
+variable "user_account_id" {
+  description = "account id"
+  type        = string
+  default     = "396913738235"
+}
+variable "alias_ec2_key" {
+  description = "alias for ebs key"
+  type        = string
+  default     = "xxxx"
+}
+variable "alias_rds_key" {
+  description = "alias for rds key"
+  type        = string
+  default     = "xxxx"
+}
+
+variable "certificate_arn" {
+  description = "certificate_arn"
+  type        = string
+  default     = "xxxx"
+}
