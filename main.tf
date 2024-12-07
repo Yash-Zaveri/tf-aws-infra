@@ -294,7 +294,7 @@ EOF
 # Auto Scaling Group
 resource "aws_autoscaling_group" "app_asg" {
 
-  name             = "csye6225"
+  name = "csye6225"
   # desired_capacity = 3
   # min_size         = 3
   # max_size         = 5
@@ -1340,7 +1340,7 @@ resource "aws_iam_policy" "secrets_access" {
           "secretsmanager:GetSecretValue",
           "secretsmanager:DescribeSecret"
         ],
-       Resource = "*"
+        Resource = "*"
       },
       {
         Effect   = "Allow",
