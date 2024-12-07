@@ -242,16 +242,14 @@ resource "aws_launch_template" "app_launch_template" {
 sudo apt update
 sudo apt install -y mysql-client
 
-# Fetch the password from AWS Secrets Manager for the DB password
-NEW_PASSWORD=$(aws secretsmanager get-secret-value --secret-id db-password --query 'SecretString' --output text | jq -r '.password')
-
 # Set MySQL connection details
 DB_HOST="${aws_db_instance.my_rds_instance.address}"
 DB_ADMIN_USER="${var.db_user}"  # Replace with your admin username
 DB_ADMIN_PASSWORD="${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"  # Replace with the admin password
 DB_NAME="csye6225"
 NEW_USER="csye6225"
-# NEW_PASSWORD="${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"  # Replace with the new user's password
+NEW_PASSWORD="${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"
+
 
 # Create a new user and grant full access
 mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASSWORD" <<SQL
@@ -262,6 +260,7 @@ SQL
 
 # Create the .env file with database environment variables
 cat <<EOT >> /opt/.env
+test = "${jsondecode(data.aws_secretsmanager_secret_version.db_password_secret_version_data.secret_string).password}"
 MYSQL_HOST="$DB_HOST"
 MYSQL_USER="$NEW_USER"
 MYSQL_PASSWORD="$NEW_PASSWORD"
@@ -296,12 +295,12 @@ EOF
 resource "aws_autoscaling_group" "app_asg" {
 
   name             = "csye6225"
-  desired_capacity = 3
-  min_size         = 3
-  max_size         = 5
-  # desired_capacity    = 1
-  # min_size            = 1
-  # max_size            = 1
+  # desired_capacity = 3
+  # min_size         = 3
+  # max_size         = 5
+  desired_capacity    = 1
+  min_size            = 1
+  max_size            = 1
   vpc_zone_identifier = aws_subnet.public_subnets[*].id
 
   launch_template {
@@ -1329,8 +1328,33 @@ resource "aws_iam_role_policy_attachment" "attach_lambda_secrets_access" {
 }
 
 
+resource "aws_iam_policy" "secrets_access" {
+  name        = "SecretsAccessPolicy"
+  description = "Policy to access Secrets Manager"
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ],
+       Resource = "*"
+      },
+      {
+        Effect   = "Allow",
+        Action   = "kms:Decrypt",
+        Resource = "*"
+      }
+    ]
+  })
+}
 
-
+resource "aws_iam_role_policy_attachment" "attach_ec2_secret_manager" {
+  role       = aws_iam_role.s3_access_role.name
+  policy_arn = aws_iam_policy.secrets_access.arn
+}
 
 
 
